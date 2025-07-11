@@ -12,6 +12,7 @@ from queue import Queue
 import os
 from sqlalchemy import text
 
+# Initialize Flask app
 app = Flask(__name__)
 CORS(app)
 
@@ -23,6 +24,7 @@ if DATABASE_URL and DATABASE_URL.startswith('postgres://'):
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL or 'sqlite:///search_engine.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+# Initialize SQLAlchemy
 db = SQLAlchemy(app)
 
 # Database Models
@@ -336,6 +338,25 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# Database initialization function
+def create_tables():
+    """Create database tables if they don't exist"""
+    try:
+        with app.app_context():
+            # Check if tables exist
+            inspector = db.inspect(db.engine)
+            existing_tables = inspector.get_table_names()
+            
+            if 'web_page' not in existing_tables or 'crawl_queue' not in existing_tables:
+                print("Creating database tables...")
+                db.create_all()
+                print("Database tables created successfully!")
+            else:
+                print("Database tables already exist")
+                
+    except Exception as e:
+        print(f"Error creating tables: {e}")
+
 # API Routes
 @app.route('/')
 def index():
@@ -362,67 +383,82 @@ def add_url_to_crawl():
     if not crawler.is_valid_url(url):
         return jsonify({'error': 'Invalid URL'}), 400
     
-    existing = CrawlQueue.query.filter_by(url=url).first()
-    if not existing:
-        new_crawl = CrawlQueue(url=url)
-        db.session.add(new_crawl)
-        db.session.commit()
+    try:
+        existing = CrawlQueue.query.filter_by(url=url).first()
+        if not existing:
+            new_crawl = CrawlQueue(url=url)
+            db.session.add(new_crawl)
+            db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Database error: {str(e)}'}), 500
     
     return jsonify({'message': 'URL added to crawl queue', 'url': url})
 
 @app.route('/api/crawl/start', methods=['POST'])
 def start_crawling():
-    pending_urls = CrawlQueue.query.filter_by(status='pending').limit(10).all()
-    
-    crawled_count = 0
-    for crawl_item in pending_urls:
-        crawl_item.status = 'processing'
-        db.session.commit()
+    try:
+        pending_urls = CrawlQueue.query.filter_by(status='pending').limit(10).all()
         
-        success = crawler.crawl_page(crawl_item.url)
+        crawled_count = 0
+        for crawl_item in pending_urls:
+            crawl_item.status = 'processing'
+            db.session.commit()
+            
+            success = crawler.crawl_page(crawl_item.url)
+            
+            if success:
+                crawl_item.status = 'completed'
+                crawled_count += 1
+            else:
+                crawl_item.status = 'failed'
+            
+            db.session.commit()
+            time.sleep(1)  # Be respectful to servers
         
-        if success:
-            crawl_item.status = 'completed'
-            crawled_count += 1
-        else:
-            crawl_item.status = 'failed'
-        
-        db.session.commit()
-        time.sleep(1)  # Be respectful to servers
-    
-    return jsonify({
-        'message': f'Crawled {crawled_count} pages',
-        'crawled_count': crawled_count
-    })
+        return jsonify({
+            'message': f'Crawled {crawled_count} pages',
+            'crawled_count': crawled_count
+        })
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Crawling error: {str(e)}'}), 500
 
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
-    total_pages = WebPage.query.count()
-    pending_crawls = CrawlQueue.query.filter_by(status='pending').count()
-    completed_crawls = CrawlQueue.query.filter_by(status='completed').count()
-    failed_crawls = CrawlQueue.query.filter_by(status='failed').count()
-    
-    return jsonify({
-        'total_indexed_pages': total_pages,
-        'pending_crawls': pending_crawls,
-        'completed_crawls': completed_crawls,
-        'failed_crawls': failed_crawls
-    })
+    try:
+        total_pages = WebPage.query.count()
+        pending_crawls = CrawlQueue.query.filter_by(status='pending').count()
+        completed_crawls = CrawlQueue.query.filter_by(status='completed').count()
+        failed_crawls = CrawlQueue.query.filter_by(status='failed').count()
+        
+        return jsonify({
+            'total_indexed_pages': total_pages,
+            'pending_crawls': pending_crawls,
+            'completed_crawls': completed_crawls,
+            'failed_crawls': failed_crawls
+        })
+    except Exception as e:
+        return jsonify({'error': f'Stats error: {str(e)}'}), 500
 
 @app.route('/api/pages', methods=['GET'])
 def get_pages():
     """Get all indexed pages"""
-    pages = WebPage.query.order_by(WebPage.crawled_at.desc()).limit(50).all()
-    return jsonify([{
-        'url': page.url,
-        'title': page.title,
-        'crawled_at': page.crawled_at.isoformat() if page.crawled_at else None
-    } for page in pages])
+    try:
+        pages = WebPage.query.order_by(WebPage.crawled_at.desc()).limit(50).all()
+        return jsonify([{
+            'url': page.url,
+            'title': page.title,
+            'crawled_at': page.crawled_at.isoformat() if page.crawled_at else None
+        } for page in pages])
+    except Exception as e:
+        return jsonify({'error': f'Pages error: {str(e)}'}), 500
 
-# Initialize database
-def init_db():
-    with app.app_context():
-        db.create_all()
+@app.route('/api/init', methods=['POST'])
+def initialize_database():
+    """Manual database initialization endpoint"""
+    try:
+        create_tables()
         
         # Add some initial URLs for demo
         initial_urls = [
@@ -439,12 +475,25 @@ def init_db():
                 new_crawl = CrawlQueue(url=url)
                 db.session.add(new_crawl)
         
+        db.session.commit()
+        return jsonify({'message': 'Database initialized successfully'})
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Initialization error: {str(e)}'}), 500
+
+# Application startup
+@app.before_request
+def before_first_request():
+    """Ensure database is initialized before any request"""
+    if not hasattr(app, 'db_initialized'):
         try:
-            db.session.commit()
+            create_tables()
+            app.db_initialized = True
         except Exception as e:
-            db.session.rollback()
-            print(f"Error initializing database: {e}")
+            print(f"Warning: Could not initialize database: {e}")
 
 if __name__ == '__main__':
-    init_db()
+    # Initialize database on startup
+    create_tables()
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
