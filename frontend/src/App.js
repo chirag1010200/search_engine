@@ -16,7 +16,7 @@ function App() {
   const [activeTab, setActiveTab] = useState('search');
   const [pages, setPages] = useState([]);
 
-  const API_BASE = 'http://localhost:5000/api';
+  const API_BASE = 'https://searchengine-production-93d9.up.railway.app/';
 
   // Check URL parameter for admin mode on component mount
   useEffect(() => {
